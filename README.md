@@ -2,7 +2,7 @@
 <div align="center">
 
 
-| Developer & Author | Built          |
+| Developer & Author | Year          |
 |--------------------|----------------|
 | Naadir D           | 2025           |
 
