@@ -1,8 +1,14 @@
 # Mortgage Overpayment Tracker
 
+## Overview
+
 **Mortgage Overpayment Tracker** is a PyQt6 application that helps you track and simulate mortgage amortization with customizable overpayments, visualize balance over time, and export comprehensive PDF reports. It supports saving and loading your mortgage details and features a toggleable dark/light theme.
 
 ![Alt text](screens/screen.JPG)
+
+| Developer & Author | Built                |
+|--------------------|----------------------|
+| Naadir D           | 2025                 |
 
 ## Features
 
