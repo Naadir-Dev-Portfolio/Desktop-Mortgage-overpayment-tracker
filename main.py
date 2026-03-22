@@ -1,644 +1,1087 @@
 #!/usr/bin/env python3
-"""
-Mortgage Tracker & Overpayment Calculator Application
-
-This PyQt6 application allows you to input mortgage details, simulate
-the amortization schedule with and without monthly overpayments, display
-a dynamic graph of mortgage balance over time, provide a payment breakdown,
-estimate the payoff date, and export your data as a PDF report. It also
-supports saving/loading mortgage details to/from a local JSON file and
-toggling between a dark and a light theme.
-
-Author: [Your Name]
-Date: [Today's Date]
-"""
-
-import sys
-import json
-import datetime
-import os
-from math import ceil
-
+import sys, json, os, csv
+from math import log
+from datetime import date
+from dateutil.relativedelta import relativedelta
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLineEdit, QLabel, QPushButton, QFileDialog, QMessageBox, QScrollArea, QComboBox
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QDoubleSpinBox, QSpinBox, QDateEdit,
+    QPushButton, QScrollArea, QFrame, QTabWidget,
+    QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QSizePolicy,
+    QMessageBox, QCheckBox, QAbstractSpinBox
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIntValidator, QDoubleValidator
-
+from PyQt6.QtCore import Qt, QDate, QTimer
+from PyQt6.QtGui import QFont
 import matplotlib
-matplotlib.use('QtAgg')
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+matplotlib.use("QtAgg")
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import matplotlib.ticker as mticker
+import numpy as np
 
-# ReportLab is used for PDF export
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+# ─────────────────────────────────────────────
+#  COLOUR PALETTE  (charcoal / coal dark theme)
+# ─────────────────────────────────────────────
+BG_DARK  = "#16161A"
+CARD_BG  = "#202028"
+PANEL_BG = "#1A1A20"
+BORDER   = "#30303C"
+TEXT     = "#DCDCE6"
+TEXT_DIM = "#72728A"
 
-# =============================================================================
-# Mortgage Calculator Logic
-# =============================================================================
-class MortgageCalculator:
-    """Encapsulates mortgage calculations and simulation of the amortization schedule."""
-    
+ACCENT   = "#7C6FF7"   # indigo-purple
+ACCENT2  = "#F06B6B"   # coral-red
+GREEN    = "#3DD68C"   # emerald
+YELLOW   = "#F4A13E"   # amber
+
+CHART_COLORS = [ACCENT, ACCENT2, GREEN, YELLOW, "#54A0FF", "#FF9F43", "#5F27CD"]
+
+# ─────────────────────────────────────────────
+#  SMART SPINBOX  — select-all on focus / click
+# ─────────────────────────────────────────────
+class SmartSpin(QDoubleSpinBox):
+    """Double spinbox that selects all text when focused or clicked,
+    so typing immediately overwrites the current value."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setGroupSeparatorShown(True)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+
+class SmartIntSpin(QSpinBox):
+    """Integer spinbox with the same select-all behaviour."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+# ─────────────────────────────────────────────
+#  STYLESHEET
+# ─────────────────────────────────────────────
+def stylesheet() -> str:
+    return f"""
+    QMainWindow, QWidget {{
+        background: {BG_DARK};
+        color: {TEXT};
+        font-family: 'Segoe UI';
+        font-size: 13px;
+    }}
+    QFrame#card {{
+        background: {CARD_BG};
+        border: 1px solid {BORDER};
+        border-radius: 10px;
+    }}
+    QFrame#panel {{
+        background: {PANEL_BG};
+        border-right: 1px solid {BORDER};
+    }}
+    QLabel {{ color: {TEXT}; background: transparent; }}
+    QLabel#heading   {{ font-size: 20px; font-weight: 700; color: {TEXT}; }}
+    QLabel#subhead   {{ font-size: 12px; font-weight: 600; color: {TEXT_DIM};
+                        padding-top: 6px; border-top: 1px solid {BORDER}; }}
+    QLabel#dim       {{ color: {TEXT_DIM}; font-size: 12px; }}
+    QLabel#kpi       {{ font-size: 24px; font-weight: 700; color: {ACCENT}; }}
+    QLabel#kpi2      {{ font-size: 24px; font-weight: 700; color: {GREEN};  }}
+    QLabel#kpi3      {{ font-size: 24px; font-weight: 700; color: {YELLOW}; }}
+    QLabel#kpi4      {{ font-size: 24px; font-weight: 700; color: {ACCENT2};}}
+
+    QDoubleSpinBox, QSpinBox, QDateEdit, QComboBox {{
+        background: {BG_DARK};
+        color: {TEXT};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 13px;
+        selection-background-color: {ACCENT};
+        selection-color: #fff;
+    }}
+    QDoubleSpinBox::up-button, QSpinBox::up-button,
+    QDoubleSpinBox::down-button, QSpinBox::down-button {{
+        width: 22px;
+        border: none;
+        background: {CARD_BG};
+        border-radius: 3px;
+    }}
+    QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+    QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{
+        background: {BORDER};
+    }}
+    QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
+        image: none; width: 0; height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-bottom: 6px solid {TEXT_DIM};
+    }}
+    QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
+        image: none; width: 0; height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 6px solid {TEXT_DIM};
+    }}
+    QDoubleSpinBox:focus, QSpinBox:focus, QDateEdit:focus {{
+        border: 1px solid {ACCENT};
+        background: {CARD_BG};
+    }}
+
+    QPushButton {{
+        background: {ACCENT};
+        color: #fff;
+        border: none;
+        border-radius: 7px;
+        padding: 8px 18px;
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton:hover   {{ background: #9088FF; }}
+    QPushButton:pressed {{ background: #5A52D5; }}
+    QPushButton#secondary {{
+        background: {CARD_BG};
+        color: {TEXT};
+        border: 1px solid {BORDER};
+    }}
+    QPushButton#secondary:hover {{ background: {BORDER}; }}
+    QPushButton#green {{
+        background: {GREEN};
+        color: {BG_DARK};
+    }}
+    QPushButton#green:hover {{ background: #50E8A0; }}
+
+    QTabWidget::pane {{ border: none; background: {BG_DARK}; }}
+    QTabBar::tab {{
+        background: {CARD_BG};
+        color: {TEXT_DIM};
+        border: none;
+        padding: 10px 24px;
+        font-size: 13px;
+        font-weight: 600;
+        margin-right: 2px;
+        border-radius: 8px 8px 0 0;
+    }}
+    QTabBar::tab:selected {{ background: {ACCENT}; color: #fff; }}
+    QTabBar::tab:hover:!selected {{ background: {BORDER}; color: {TEXT}; }}
+
+    QScrollBar:vertical {{
+        background: {PANEL_BG}; width: 5px; margin: 0;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {BORDER}; border-radius: 2px; min-height: 24px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+    QScrollBar:horizontal {{
+        background: {PANEL_BG}; height: 5px;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: {BORDER}; border-radius: 2px; min-width: 24px;
+    }}
+    QScrollBar::handle:horizontal:hover {{ background: {ACCENT}; }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+
+    QTableWidget {{
+        background: {CARD_BG};
+        color: {TEXT};
+        gridline-color: {BORDER};
+        border: none;
+        border-radius: 8px;
+        font-size: 12px;
+    }}
+    QTableWidget::item {{ padding: 5px 10px; }}
+    QTableWidget::item:selected {{ background: {ACCENT}; color: #fff; }}
+    QHeaderView::section {{
+        background: {PANEL_BG};
+        color: {TEXT_DIM};
+        border: none;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+
+    QCheckBox {{ color: {TEXT}; spacing: 6px; }}
+    QCheckBox::indicator {{
+        width: 15px; height: 15px;
+        border-radius: 4px;
+        border: 1px solid {BORDER};
+        background: {BG_DARK};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {ACCENT};
+        border: 1px solid {ACCENT};
+    }}
+
+    QGroupBox {{
+        color: {TEXT_DIM};
+        border: 1px solid {BORDER};
+        border-radius: 7px;
+        margin-top: 10px;
+        padding-top: 10px;
+        font-size: 12px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 4px;
+    }}
+    """
+
+# ─────────────────────────────────────────────
+#  MORTGAGE CALCULATION ENGINE
+#  Key fix: initial payment is calculated ONCE and held fixed.
+#  Overpayments are applied on top of that fixed payment, reducing
+#  the principal faster and ending the mortgage early.
+# ─────────────────────────────────────────────
+class MortgageCalc:
+    def __init__(self, principal: float, annual_rate: float, term_months: int,
+                 start_date: date, monthly_overpay: float = 0.0,
+                 lump_sums: list = None,
+                 rate2: float = None, rate2_start_month: int = None):
+        self.principal          = principal
+        self.annual_rate        = annual_rate
+        self.term_months        = term_months
+        self.start_date         = start_date
+        self.monthly_overpay    = monthly_overpay
+        self.lump_sums          = {ls["month"]: ls["amount"] for ls in (lump_sums or [])}
+        self.rate2              = rate2
+        self.rate2_start_month  = rate2_start_month
+
     @staticmethod
-    def calc_monthly_payment(principal: float, annual_rate: float, term_months: int) -> float:
-        """
-        Calculate the fixed monthly payment required to amortize a loan.
+    def _payment(balance: float, monthly_rate: float, remaining_months: int) -> float:
+        if monthly_rate == 0:
+            return balance / remaining_months
+        r, n = monthly_rate, remaining_months
+        return balance * r * (1 + r) ** n / ((1 + r) ** n - 1)
 
-        :param principal: The loan amount.
-        :param annual_rate: The annual interest rate (in %).
-        :param term_months: The total number of months over which the loan is amortized.
-        :return: The monthly payment amount.
-        """
-        if annual_rate == 0:
-            return principal / term_months
-        monthly_rate = annual_rate / 100 / 12
-        return principal * monthly_rate * (1 + monthly_rate) ** term_months / ((1 + monthly_rate) ** term_months - 1)
+    def simulate(self) -> list[dict]:
+        balance = self.principal
+        mr1     = self.annual_rate / 12 / 100
 
-    @staticmethod
-    def simulate_schedule(loan_amount: float, mortgage_term_years: int, fixed_rate: float,
-                          fixed_term_years: int, remaining_rate: float, monthly_overpayment: float = 0.0):
-        """
-        Simulate the full amortization schedule with a two-phase (fixed then variable) interest rate.
-        Returns a tuple (schedule, summary) where schedule is a list of monthly entries and summary is a dict.
-        Each entry in schedule is a dict with keys: month, payment, interest, principal, overpayment, balance.
-        The simulation stops when the loan is paid off.
-        """
-        schedule = []
-        total_months = mortgage_term_years * 12
-        fixed_months = min(fixed_term_years * 12, total_months)
-        month = 1
-        balance = loan_amount
-        total_interest = 0.0
+        # Fixed initial payment (standard amortisation)
+        fixed_pmt = self._payment(balance, mr1, self.term_months)
 
-        # Phase 1: Fixed rate period
-        monthly_payment_fixed = MortgageCalculator.calc_monthly_payment(loan_amount, fixed_rate, total_months)
-        while month <= fixed_months and balance > 0:
-            monthly_rate = fixed_rate / 100 / 12
-            interest = balance * monthly_rate
-            principal_component = monthly_payment_fixed - interest
-            extra = monthly_overpayment
-            payment = monthly_payment_fixed + extra
-            # Ensure we don’t overpay
-            if principal_component + extra > balance:
-                principal_component = balance
-                extra = 0
-                payment = balance + interest
+        schedule  = []
+        for m in range(1, self.term_months + 1):
+            if balance <= 0:
+                break
 
-            balance = max(balance - (principal_component + extra), 0)
-            total_interest += interest
+            # Switch to variable rate: recalculate payment on remaining balance/term
+            if (self.rate2 is not None and
+                    self.rate2_start_month is not None and
+                    m == self.rate2_start_month):
+                mr1       = self.rate2 / 12 / 100
+                remaining = self.term_months - m + 1
+                fixed_pmt = self._payment(balance, mr1, remaining)
 
+            mr       = mr1
+            interest = balance * mr
+
+            # How much of the fixed payment goes to principal
+            principal_part = max(0.0, fixed_pmt - interest)
+
+            # Overpayment (cannot overpay more than remaining balance)
+            extra = self.monthly_overpay + self.lump_sums.get(m, 0.0)
+            actual_extra = min(extra, max(0.0, balance - principal_part))
+
+            total_pmt = fixed_pmt + actual_extra
+            balance   = max(0.0, balance - principal_part - actual_extra)
+
+            pmt_date  = self.start_date + relativedelta(months=m - 1)
             schedule.append({
-                "month": month,
-                "payment": payment,
-                "interest": interest,
-                "principal": principal_component,
-                "overpayment": extra,
-                "balance": balance
+                "month":       m,
+                "date":        pmt_date,
+                "payment":     total_pmt,
+                "principal":   principal_part + actual_extra,
+                "interest":    interest,
+                "balance":     balance,
+                "overpayment": actual_extra,
+                "fixed_pmt":   fixed_pmt,
             })
-            month += 1
+            if balance == 0.0:
+                break
 
-        # Phase 2: Remaining period with new interest rate (if balance still remains)
-        if balance > 0:
-            remaining_months = total_months - fixed_months
-            # Recalculate monthly payment based on the new rate and remaining term.
-            # Note: In reality, the term might change if overpayments accelerate payoff.
-            monthly_payment_remaining = MortgageCalculator.calc_monthly_payment(balance, remaining_rate, remaining_months)
-            while balance > 0:
-                monthly_rate = remaining_rate / 100 / 12
-                interest = balance * monthly_rate
-                principal_component = monthly_payment_remaining - interest
-                extra = monthly_overpayment
-                payment = monthly_payment_remaining + extra
+        return schedule
 
-                if principal_component + extra > balance:
-                    principal_component = balance
-                    extra = 0
-                    payment = balance + interest
-
-                balance = max(balance - (principal_component + extra), 0)
-                total_interest += interest
-
-                schedule.append({
-                    "month": month,
-                    "payment": payment,
-                    "interest": interest,
-                    "principal": principal_component,
-                    "overpayment": extra,
-                    "balance": balance
-                })
-                month += 1
-
-        # Summary calculations
-        months_taken = month - 1
-        total_payment = sum(item["payment"] for item in schedule)
-        # Estimate payoff date (approximate: assume 30 days per month)
-        payoff_date = (datetime.date.today() + datetime.timedelta(days=months_taken * 30)).strftime("%Y-%m-%d")
-        summary = {
-            "total_interest": total_interest,
-            "total_payment": total_payment,
-            "months_taken": months_taken,
-            "payoff_date": payoff_date,
-            "time_saved_months": total_months - months_taken if months_taken < total_months else 0
-        }
-        return schedule, summary
+    def simulate_base(self) -> list[dict]:
+        """Simulate without any overpayments (baseline for comparison)."""
+        orig_op, orig_ls       = self.monthly_overpay, self.lump_sums
+        self.monthly_overpay   = 0.0
+        self.lump_sums         = {}
+        result = self.simulate()
+        self.monthly_overpay   = orig_op
+        self.lump_sums         = orig_ls
+        return result
 
     @staticmethod
-    def get_payment_breakdown(schedule: list):
-        """
-        Aggregate the breakdown of total interest, principal, and payments over the schedule.
-        """
-        total_interest = sum(item["interest"] for item in schedule)
-        total_principal = sum(item["principal"] for item in schedule)
-        total_overpayment = sum(item["overpayment"] for item in schedule)
-        total_payment = sum(item["payment"] for item in schedule)
-        return {
-            "total_interest": total_interest,
-            "total_principal": total_principal,
-            "total_overpayment": total_overpayment,
-            "total_payment": total_payment
-        }
+    def stamp_duty(price: float, is_first_buyer: bool = False,
+                   is_additional: bool = False) -> float:
+        """UK Stamp Duty Land Tax — rates from April 2025."""
+        if is_additional:
+            bands = [(250_000, 0.05), (925_000, 0.10),
+                     (1_500_000, 0.15), (float("inf"), 0.17)]
+        elif is_first_buyer and price <= 625_000:
+            bands = [(425_000, 0.00), (625_000, 0.05)]
+        else:
+            bands = [(250_000, 0.00), (925_000, 0.05),
+                     (1_500_000, 0.10), (float("inf"), 0.12)]
+        tax, prev = 0.0, 0
+        for limit, rate in bands:
+            chunk = min(price, limit) - prev
+            if chunk <= 0:
+                break
+            tax  += chunk * rate
+            prev  = limit
+        return tax
 
-# =============================================================================
-# Graph Plotting Widget
-# =============================================================================
-class GraphCanvas(FigureCanvas):
-    """Matplotlib canvas to display mortgage balance graphs."""
-    
-    def __init__(self, parent=None, width=5, height=4, dpi=100):
-        self.fig = Figure(figsize=(width, height), dpi=dpi, facecolor='#1A1A1A')
-        self.ax = self.fig.add_subplot(111)
+    @staticmethod
+    def overpayment_for_target(principal, annual_rate, term_months, start_date,
+                                target_months: int,
+                                rate2=None, rate2_start=None) -> float:
+        """Binary search: monthly overpayment needed to pay off in target_months."""
+        lo, hi = 0.0, principal
+        for _ in range(60):
+            mid  = (lo + hi) / 2
+            calc = MortgageCalc(principal, annual_rate, term_months, start_date, mid,
+                                rate2=rate2, rate2_start_month=rate2_start)
+            if len(calc.simulate()) <= target_months:
+                hi = mid
+            else:
+                lo = mid
+        return round((lo + hi) / 2, 2)
+
+# ─────────────────────────────────────────────
+#  CHART CANVAS WRAPPER
+# ─────────────────────────────────────────────
+class ChartCanvas(FigureCanvas):
+    def __init__(self, parent=None, figsize=(8, 3.8)):
+        self.fig, self.ax = Figure(figsize=figsize, facecolor=CARD_BG), None
+        self.ax = self.fig.add_subplot(111, facecolor=CARD_BG)
         super().__init__(self.fig)
         self.setParent(parent)
-        self.fig.tight_layout()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._style()
 
-    def update_plot(self, schedule_with: list, schedule_without: list):
-        """
-        Update the graph with two schedules:
-         - schedule_with: with overpayments.
-         - schedule_without: without overpayments.
-        """
-        self.ax.clear()
-        self.ax.set_facecolor('#101010')
-        self.fig.patch.set_facecolor('#1A1A1A')
-        
-        # Prepare x (month) and y (balance) data
-        months_with = [item["month"] for item in schedule_with]
-        balance_with = [item["balance"] for item in schedule_with]
-        months_without = [item["month"] for item in schedule_without]
-        balance_without = [item["balance"] for item in schedule_without]
-        
-        self.ax.plot(months_without, balance_without, label="Without Overpayments", color="#5E5E5E", linewidth=2)
-        self.ax.plot(months_with, balance_with, label="With Overpayments", color="#3E8E41", linewidth=2)
-        
-        self.ax.set_xlabel("Month", color="white")
-        self.ax.set_ylabel("Remaining Balance (£)", color="white")
-        self.ax.tick_params(axis='x', colors='white')
-        self.ax.tick_params(axis='y', colors='white')
-        self.ax.legend(facecolor='#2F2F2F', edgecolor='white', labelcolor='white')
-        self.draw()
+    def _style(self):
+        self.ax.tick_params(colors=TEXT_DIM, labelsize=10)
+        for sp in self.ax.spines.values():
+            sp.set_color(BORDER)
+        self.ax.xaxis.label.set_color(TEXT_DIM)
+        self.ax.yaxis.label.set_color(TEXT_DIM)
+        self.fig.tight_layout(pad=1.6)
 
-# =============================================================================
-# File Handling (Save & Load)
-# =============================================================================
-class FileHandler:
-    """Handles saving and loading mortgage data as JSON."""
-    
-    @staticmethod
-    def save_data(data: dict, filename: str):
-        with open(filename, 'w') as f:
-            json.dump(data, f, indent=4)
-    
-    @staticmethod
-    def load_data(filename: str) -> dict:
-        with open(filename, 'r') as f:
-            data = json.load(f)
-        return data
+    def clear(self):
+        self.ax.cla()
+        self.ax.set_facecolor(CARD_BG)
+        self._style()
 
-# =============================================================================
-# PDF Report Exporter
-# =============================================================================
-class ReportExporter:
-    """Exports the mortgage calculations and graph as a PDF report using ReportLab."""
-    
-    @staticmethod
-    def export_pdf(filename: str, inputs: dict, summary: dict, breakdown: dict, graph_canvas: GraphCanvas):
-        c = canvas.Canvas(filename, pagesize=letter)
-        width, height = letter
-        
-        # Title
-        c.setFont("Helvetica-Bold", 18)
-        c.drawCentredString(width / 2, height - 50, "Mortgage Report")
-        
-        # Inputs section
-        c.setFont("Helvetica", 12)
-        textobject = c.beginText(50, height - 80)
-        textobject.textLine("Mortgage Details:")
-        for key, value in inputs.items():
-            textobject.textLine(f"  {key}: {value}")
-        c.drawText(textobject)
-        
-        # Summary section
-        textobject = c.beginText(50, height - 180)
-        textobject.textLine("Mortgage Summary:")
-        for key, value in summary.items():
-            textobject.textLine(f"  {key}: {value}")
-        c.drawText(textobject)
-        
-        # Payment breakdown
-        textobject = c.beginText(50, height - 260)
-        textobject.textLine("Payment Breakdown:")
-        for key, value in breakdown.items():
-            textobject.textLine(f"  {key}: {round(value,2)}")
-        c.drawText(textobject)
-        
-        # Save the current graph to a temporary file and embed it.
-        temp_graph = "temp_graph.png"
-        graph_canvas.fig.savefig(temp_graph)
-        c.drawImage(temp_graph, 50, height - 500, width=500, height=200)
-        os.remove(temp_graph)
-        
-        c.showPage()
-        c.save()
+    def fmt_currency(self):
+        self.ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"£{v:,.0f}"))
 
-# =============================================================================
-# Main Application Window
-# =============================================================================
-class MortgageTrackerWindow(QMainWindow):
-    """Main window for the Mortgage Tracker & Overpayment Calculator."""
-    
+
+class DualChartCanvas(FigureCanvas):
+    """Two side-by-side axes."""
+    def __init__(self, parent=None, figsize=(12, 3.8)):
+        self.fig = Figure(figsize=figsize, facecolor=CARD_BG)
+        self.ax1 = self.fig.add_subplot(121, facecolor=CARD_BG)
+        self.ax2 = self.fig.add_subplot(122, facecolor=CARD_BG)
+        super().__init__(self.fig)
+        self.setParent(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._style()
+
+    def _style(self):
+        for ax in (self.ax1, self.ax2):
+            ax.tick_params(colors=TEXT_DIM, labelsize=10)
+            for sp in ax.spines.values():
+                sp.set_color(BORDER)
+        self.fig.tight_layout(pad=1.6)
+
+    def clear(self):
+        for ax in (self.ax1, self.ax2):
+            ax.cla()
+            ax.set_facecolor(CARD_BG)
+        self._style()
+
+    def fmt_currency(self, ax):
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda v, _: f"£{v:,.0f}"))
+
+# ─────────────────────────────────────────────
+#  METRIC CARD WIDGET
+# ─────────────────────────────────────────────
+class MetricCard(QFrame):
+    def __init__(self, title: str, value: str = "—",
+                 sub: str = "", kpi_id: str = "kpi", parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.setMinimumWidth(130)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(3)
+        self._t = QLabel(title);   self._t.setObjectName("dim")
+        self._v = QLabel(value);   self._v.setObjectName(kpi_id)
+        self._s = QLabel(sub);     self._s.setObjectName("dim"); self._s.setWordWrap(True)
+        for w in (self._t, self._v, self._s):
+            lay.addWidget(w)
+
+    def update(self, value: str, sub: str = ""):
+        self._v.setText(value)
+        self._s.setText(sub)
+
+# ─────────────────────────────────────────────
+#  SIDEBAR INPUT PANEL
+# ─────────────────────────────────────────────
+class Sidebar(QScrollArea):
+    calculate_requested = __import__("PyQt6.QtCore", fromlist=["pyqtSignal"]).pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("panel")
+        self.setWidgetResizable(True)
+        self.setFixedWidth(300)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        inner = QWidget()
+        self.setWidget(inner)
+        L = QVBoxLayout(inner)
+        L.setContentsMargins(14, 14, 14, 18)
+        L.setSpacing(10)
+
+        # ── title ──
+        t = QLabel("Mortgage Details")
+        t.setObjectName("heading")
+        t.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
+        L.addWidget(t)
+
+        # ── Property & loan ──
+        L.addWidget(self._sec("Property & Loan"))
+        self.price   = self._spin("Property Price",  0, 5_000_000, 350_000, L, "£ ", 0)
+        self.deposit = self._spin("Deposit",         0, 5_000_000,  50_000, L, "£ ", 0)
+        self.ltv_lbl = QLabel("LTV: —  |  Loan: —")
+        self.ltv_lbl.setObjectName("dim")
+        L.addWidget(self.ltv_lbl)
+        self.price.valueChanged.connect(self._update_ltv)
+        self.deposit.valueChanged.connect(self._update_ltv)
+
+        # ── Rate & term ──
+        L.addWidget(self._sec("Interest & Term"))
+        self.rate     = self._spin("Initial Rate (%)", 0,  20,  4.5, L, "", 2, 0.05)
+        self.term_yrs = self._spin("Term (years)",     1,  40,   25, L, "", 0, 1)
+        L.addWidget(QLabel("Start Date"))
+        self.start_dt = QDateEdit(QDate.currentDate())
+        self.start_dt.setCalendarPopup(True)
+        self.start_dt.setDisplayFormat("dd/MM/yyyy")
+        L.addWidget(self.start_dt)
+
+        # ── Variable rate ──
+        self.chk_rate2 = QCheckBox("Variable rate after fixed period")
+        L.addWidget(self.chk_rate2)
+        self._r2f = QFrame(); r2l = QVBoxLayout(self._r2f)
+        r2l.setContentsMargins(0, 0, 0, 0); r2l.setSpacing(6)
+        self.fix_yrs  = self._spin("Fixed period (yrs)", 1, 40, 2,   None, "", 0, 1)
+        self.rate2    = self._spin("Variable rate (%)",  0, 20, 6.5, None, "", 2, 0.05)
+        for lbl, w in [("Fixed period (yrs)", self.fix_yrs), ("Variable rate (%)", self.rate2)]:
+            r2l.addWidget(QLabel(lbl)); r2l.addWidget(w)
+        self._r2f.setVisible(False)
+        L.addWidget(self._r2f)
+        self.chk_rate2.toggled.connect(self._r2f.setVisible)
+
+        # ── Overpayments ──
+        L.addWidget(self._sec("Overpayments"))
+        self.overpay = self._spin("Monthly Overpayment", 0, 50_000, 0, L, "£ ", 0, 50)
+        L.addWidget(QLabel("One-off Lump Sum"))
+        ls_row = QHBoxLayout()
+        self.lump_mo  = SmartIntSpin(); self.lump_mo.setRange(1, 600); self.lump_mo.setPrefix("Mo ")
+        self.lump_amt = SmartSpin();    self.lump_amt.setRange(0, 500_000); self.lump_amt.setPrefix("£ ")
+        self.lump_amt.setDecimals(0);   self.lump_amt.setSingleStep(1000); self.lump_amt.setGroupSeparatorShown(True)
+        ls_row.addWidget(self.lump_mo); ls_row.addWidget(self.lump_amt)
+        L.addLayout(ls_row)
+        b_add = QPushButton("+ Add Lump Sum"); b_add.setObjectName("secondary")
+        b_add.clicked.connect(self._add_lump); L.addWidget(b_add)
+        self._lumps: list[dict] = []
+        self._lump_lay = QVBoxLayout(); L.addLayout(self._lump_lay)
+
+        # ── Stamp Duty ──
+        L.addWidget(self._sec("Stamp Duty (SDLT)"))
+        self.chk_sd = QCheckBox("Show stamp duty estimate"); L.addWidget(self.chk_sd)
+        self._sdf = QFrame(); sdl = QVBoxLayout(self._sdf)
+        sdl.setContentsMargins(0, 0, 0, 0); sdl.setSpacing(5)
+        self.chk_ftb  = QCheckBox("First-time buyer")
+        self.chk_add  = QCheckBox("Additional property (+3%)")
+        self.sd_lbl   = QLabel("SDLT: —"); self.sd_lbl.setObjectName("dim")
+        for w in (self.chk_ftb, self.chk_add, self.sd_lbl):
+            sdl.addWidget(w)
+        self._sdf.setVisible(False); L.addWidget(self._sdf)
+        self.chk_sd.toggled.connect(self._sdf.setVisible)
+        self.price.valueChanged.connect(self._update_sd)
+        self.chk_ftb.toggled.connect(self._update_sd)
+        self.chk_add.toggled.connect(self._update_sd)
+
+        # ── Save / Load ──
+        L.addWidget(self._sec("Session"))
+        sl = QHBoxLayout()
+        bs = QPushButton("Save"); bs.setObjectName("secondary"); bs.clicked.connect(self._save)
+        bl = QPushButton("Load"); bl.setObjectName("secondary"); bl.clicked.connect(self._load)
+        sl.addWidget(bs); sl.addWidget(bl); L.addLayout(sl)
+
+        # ── Calculate ──
+        L.addSpacing(4)
+        self.b_calc = QPushButton("Calculate  ▶")
+        self.b_calc.setObjectName("green")
+        self.b_calc.setMinimumHeight(42)
+        self.b_calc.clicked.connect(self.calculate_requested.emit)
+        L.addWidget(self.b_calc)
+        L.addStretch()
+
+        self._update_ltv()
+        self._load_initial()
+
+    # ── helpers ──────────────────────────────
+    def _sec(self, txt: str) -> QLabel:
+        l = QLabel(txt); l.setObjectName("subhead")
+        l.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        return l
+
+    def _spin(self, label, lo, hi, default, layout, prefix="", dec=2, step=None) -> SmartSpin:
+        w = SmartSpin()
+        w.setDecimals(dec); w.setRange(lo, hi); w.setValue(default)
+        if prefix: w.setPrefix(prefix)
+        if step:   w.setSingleStep(step)
+        if layout:
+            layout.addWidget(QLabel(label)); layout.addWidget(w)
+        return w
+
+    def _update_ltv(self):
+        loan = max(0, self.price.value() - self.deposit.value())
+        ltv  = loan / self.price.value() * 100 if self.price.value() else 0
+        self.ltv_lbl.setText(f"LTV: {ltv:.1f}%  |  Loan: £{loan:,.0f}")
+
+    def _update_sd(self):
+        if not self.chk_sd.isChecked(): return
+        tax = MortgageCalc.stamp_duty(self.price.value(),
+                                       self.chk_ftb.isChecked(),
+                                       self.chk_add.isChecked())
+        self.sd_lbl.setText(f"SDLT: £{tax:,.0f}")
+
+    def _add_lump(self):
+        a = self.lump_amt.value()
+        if a <= 0: return
+        m = self.lump_mo.value()
+        self._lumps.append({"month": m, "amount": a})
+        lbl = QLabel(f"  Month {m}: £{a:,.0f}"); lbl.setObjectName("dim")
+        self._lump_lay.addWidget(lbl)
+
+    def get_params(self) -> dict:
+        loan = max(0, self.price.value() - self.deposit.value())
+        sd   = self.start_dt.date()
+        r2   = self.rate2.value() if self.chk_rate2.isChecked() else None
+        r2m  = int(self.fix_yrs.value() * 12) if self.chk_rate2.isChecked() else None
+        return dict(
+            principal       = loan,
+            annual_rate     = self.rate.value(),
+            term_months     = int(self.term_yrs.value() * 12),
+            start_date      = date(sd.year(), sd.month(), sd.day()),
+            monthly_overpay = self.overpay.value(),
+            lump_sums       = list(self._lumps),
+            rate2           = r2,
+            rate2_start_month = r2m,
+            price           = self.price.value(),
+            deposit         = self.deposit.value(),
+        )
+
+    def _save(self):
+        p = QFileDialog.getSaveFileName(self, "Save Session", "", "JSON (*.json)")[0]
+        if not p: return
+        d = self.get_params(); d["start_date"] = d["start_date"].isoformat()
+        with open(p, "w") as f: json.dump(d, f, indent=2)
+
+    def _load(self):
+        p = QFileDialog.getOpenFileName(self, "Load Session", "", "JSON (*.json)")[0]
+        if not p: return
+        with open(p) as f: d = json.load(f)
+        self.price.setValue(d.get("price", 350_000))
+        self.deposit.setValue(d.get("deposit", 50_000))
+        self.rate.setValue(d.get("annual_rate", 4.5))
+        self.term_yrs.setValue(d.get("term_months", 300) / 12)
+        self.overpay.setValue(d.get("monthly_overpay", 0))
+        if "start_date" in d:
+            dt = date.fromisoformat(d["start_date"])
+            self.start_dt.setDate(QDate(dt.year, dt.month, dt.day))
+
+    def _load_initial(self):
+        p = os.path.join(os.path.dirname(__file__), "initial.json")
+        if not os.path.exists(p): return
+        try:
+            with open(p) as f: d = json.load(f)
+            self.price.setValue(d.get("price", d.get("property_price", 350_000)))
+            dep  = d.get("deposit", 0)
+            loan = d.get("principal", d.get("loan_amount", 0))
+            if dep:
+                self.deposit.setValue(dep)
+            elif loan:
+                self.deposit.setValue(max(0, self.price.value() - loan))
+            self.rate.setValue(d.get("annual_rate", d.get("interest_rate", 4.5)))
+            self.term_yrs.setValue(d.get("term_months", d.get("term_years", 25) * 12) / 12)
+            self.overpay.setValue(d.get("monthly_overpay", d.get("overpayment", 0)))
+        except Exception:
+            pass
+
+# ─────────────────────────────────────────────
+#  CHART DRAWING FUNCTIONS
+# ─────────────────────────────────────────────
+def draw_balance(canvas: ChartCanvas, base: list, op: list):
+    canvas.clear()
+    ax = canvas.ax
+    db = [r["date"] for r in base]; bb = [r["balance"] for r in base]
+    do = [r["date"] for r in op];   bo = [r["balance"] for r in op]
+    ax.fill_between(db, bb, alpha=0.08, color=TEXT_DIM)
+    ax.plot(db, bb, color=TEXT_DIM, lw=1.5, ls="--", label="No overpayment")
+    ax.fill_between(do, bo, alpha=0.15, color=ACCENT)
+    ax.plot(do, bo, color=ACCENT, lw=2.2, label="With overpayment")
+    if len(do) < len(db):
+        ax.axvline(do[-1], color=GREEN, lw=1.2, ls=":", alpha=0.8)
+        ax.annotate("Early payoff", xy=(do[-1], 0), xytext=(12, 32),
+                    textcoords="offset points", color=GREEN, fontsize=9,
+                    arrowprops=dict(arrowstyle="->", color=GREEN, lw=0.8))
+    ax.set_title("Outstanding Balance Over Time", color=TEXT, fontsize=12, pad=8)
+    ax.legend(facecolor=PANEL_BG, labelcolor=TEXT, framealpha=0.9, fontsize=10, edgecolor=BORDER)
+    canvas.fmt_currency(); canvas.fig.tight_layout(pad=1.6); canvas.draw()
+
+
+def draw_equity(canvas: ChartCanvas, price: float, base: list, op: list):
+    canvas.clear(); ax = canvas.ax
+    db = [r["date"] for r in base]; eb = [price - r["balance"] for r in base]
+    do = [r["date"] for r in op];   eo = [price - r["balance"] for r in op]
+    ax.fill_between(db, eb, alpha=0.08, color=YELLOW)
+    ax.plot(db, eb, color=YELLOW, lw=1.5, ls="--", label="Equity (base)")
+    ax.fill_between(do, eo, alpha=0.15, color=GREEN)
+    ax.plot(do, eo, color=GREEN, lw=2.2, label="Equity (w/ overpay)")
+    ax.axhline(price, color=ACCENT2, lw=1, ls=":", alpha=0.5)
+    ax.set_title("Equity Built Over Time", color=TEXT, fontsize=12, pad=8)
+    ax.legend(facecolor=PANEL_BG, labelcolor=TEXT, framealpha=0.9, fontsize=10, edgecolor=BORDER)
+    canvas.fmt_currency(); canvas.fig.tight_layout(pad=1.6); canvas.draw()
+
+
+def draw_composition(canvas: ChartCanvas, op: list):
+    canvas.clear(); ax = canvas.ax
+    dates = [r["date"] for r in op]
+    intr  = [r["interest"]    for r in op]
+    prin  = [r["principal"]   for r in op]
+    xtra  = [r["overpayment"] for r in op]
+    ax.stackplot(dates, intr, prin, xtra,
+                 labels=["Interest", "Principal", "Overpayment"],
+                 colors=[ACCENT2, ACCENT, GREEN], alpha=0.88)
+    ax.set_title("Monthly Payment Composition", color=TEXT, fontsize=12, pad=8)
+    ax.legend(facecolor=PANEL_BG, labelcolor=TEXT, framealpha=0.9, fontsize=10,
+              edgecolor=BORDER, loc="upper right")
+    canvas.fmt_currency(); canvas.fig.tight_layout(pad=1.6); canvas.draw()
+
+
+def draw_annual(canvas: DualChartCanvas, base: list, op: list):
+    canvas.clear()
+    def ann(sched):
+        y: dict = {}
+        for r in sched:
+            yr = r["date"].year
+            if yr not in y: y[yr] = {"i": 0, "p": 0}
+            y[yr]["i"] += r["interest"]
+            y[yr]["p"] += r["principal"]
+        return y
+    yb, yo = ann(base), ann(op)
+    years  = sorted(set(yb) | set(yo))
+    x = np.arange(len(years)); w = 0.38
+
+    # left: interest comparison
+    ax1 = canvas.ax1
+    ax1.bar(x - w/2, [yb.get(y, {}).get("i", 0) for y in years], w, color=TEXT_DIM, alpha=0.65, label="Base")
+    ax1.bar(x + w/2, [yo.get(y, {}).get("i", 0) for y in years], w, color=ACCENT2, alpha=0.9, label="w/ overpay")
+    ax1.set_xticks(x); ax1.set_xticklabels([str(y) for y in years], rotation=50, ha="right", fontsize=8)
+    ax1.set_title("Annual Interest Paid", color=TEXT, fontsize=11, pad=6)
+    ax1.legend(facecolor=PANEL_BG, labelcolor=TEXT, framealpha=0.9, fontsize=9, edgecolor=BORDER)
+    canvas.fmt_currency(ax1)
+
+    # right: cumulative savings
+    ax2 = canvas.ax2
+    cum_b = np.cumsum([sum(r["interest"] for r in base if r["date"].year <= y) for y in years])
+    cum_o = np.cumsum([sum(r["interest"] for r in op   if r["date"].year <= y) for y in years])
+    # simpler: cumulative over schedule
+    cb = np.cumsum([r["interest"] for r in base])
+    co_dates = [r["date"] for r in op]
+    cb_dates = [r["date"] for r in base]
+    ax2.plot(cb_dates, cb, color=TEXT_DIM, lw=1.5, ls="--", label="Cumulative interest (base)")
+    ax2.plot(co_dates, np.cumsum([r["interest"] for r in op]),
+             color=GREEN, lw=2.2, label="Cumulative interest (w/ overpay)")
+    ax2.set_title("Cumulative Interest", color=TEXT, fontsize=11, pad=6)
+    ax2.legend(facecolor=PANEL_BG, labelcolor=TEXT, framealpha=0.9, fontsize=9, edgecolor=BORDER)
+    canvas.fmt_currency(ax2)
+    canvas.fig.tight_layout(pad=1.6); canvas.draw()
+
+
+def draw_savings(canvas: ChartCanvas, base: list, op: list):
+    canvas.clear(); ax = canvas.ax
+    db = [r["date"] for r in base]; cb = np.cumsum([r["payment"] for r in base])
+    do = [r["date"] for r in op];   co = np.cumsum([r["payment"] for r in op])
+    ax.plot(db, cb, color=TEXT_DIM, lw=1.5, ls="--", label="Total paid (base)")
+    ax.plot(do, co, color=GREEN,    lw=2.2, label="Total paid (w/ overpay)")
+    n = min(len(base), len(op))
+    savings = [cb[i] - co[i] for i in range(n)]
+    ax.fill_between(do[:n], savings, alpha=0.12, color=GREEN)
+    ax.set_title("Cumulative Total Cost vs Savings", color=TEXT, fontsize=12, pad=8)
+    ax.legend(facecolor=PANEL_BG, labelcolor=TEXT, framealpha=0.9, fontsize=10, edgecolor=BORDER)
+    canvas.fmt_currency(); canvas.fig.tight_layout(pad=1.6); canvas.draw()
+
+
+def draw_scenarios(canvas: ChartCanvas, scenarios: list[tuple[str, list]]):
+    canvas.clear(); ax = canvas.ax
+    for i, (label, sched) in enumerate(scenarios):
+        ax.plot([r["date"] for r in sched], [r["balance"] for r in sched],
+                color=CHART_COLORS[i % len(CHART_COLORS)], lw=2.0, label=label)
+    ax.set_title("Overpayment Scenarios — Balance", color=TEXT, fontsize=12, pad=8)
+    ax.legend(facecolor=PANEL_BG, labelcolor=TEXT, framealpha=0.9, fontsize=10, edgecolor=BORDER)
+    canvas.fmt_currency(); canvas.fig.tight_layout(pad=1.6); canvas.draw()
+
+# ─────────────────────────────────────────────
+#  DASHBOARD TAB
+# ─────────────────────────────────────────────
+class DashboardTab(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Mortgage Tracker & Overpayment Calculator")
-        self.resize(1000, 800)
-        self.current_theme = "dark"  # default mode
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 14); root.setSpacing(12)
 
-        # Main container widget
-        self.container = QWidget()
-        self.setCentralWidget(self.container)
-        self.layout = QVBoxLayout(self.container)
+        kpi_row = QHBoxLayout(); kpi_row.setSpacing(10)
+        self.kpi_pmt    = MetricCard("Monthly Payment",  kpi_id="kpi")
+        self.kpi_total  = MetricCard("Total Cost",       kpi_id="kpi2")
+        self.kpi_intr   = MetricCard("Total Interest",   kpi_id="kpi3")
+        self.kpi_save   = MetricCard("Interest Saved",   kpi_id="kpi4")
+        self.kpi_payoff = MetricCard("Payoff Date",      kpi_id="kpi")
+        self.kpi_months = MetricCard("Months Saved",     kpi_id="kpi2")
+        for k in (self.kpi_pmt, self.kpi_total, self.kpi_intr,
+                  self.kpi_save, self.kpi_payoff, self.kpi_months):
+            kpi_row.addWidget(k)
+        root.addLayout(kpi_row)
 
-        # Create input form and output area
-        self.create_input_fields()
-        self.create_output_labels()
-        self.create_buttons()
-        self.create_graph()
+        for canvas_attr, figsize in [("bal_canvas", (10, 3.8)), ("eq_canvas", (10, 3.0))]:
+            card = QFrame(); card.setObjectName("card")
+            cl   = QVBoxLayout(card); cl.setContentsMargins(10, 10, 10, 10)
+            c    = ChartCanvas(figsize=figsize); setattr(self, canvas_attr, c)
+            cl.addWidget(c); root.addWidget(card, stretch=1)
 
-        # Timer for debouncing input updates
-        self.update_timer = QTimer()
-        self.update_timer.setSingleShot(True)
-        self.update_timer.timeout.connect(self.update_calculations)
+    def refresh(self, params, base, op):
+        pmt    = op[0]["fixed_pmt"] if op else 0
+        total  = sum(r["payment"]  for r in op)
+        intr   = sum(r["interest"] for r in op)
+        b_intr = sum(r["interest"] for r in base)
+        saving = max(0, b_intr - intr)
+        months = max(0, len(base) - len(op))
+        payoff = op[-1]["date"].strftime("%b %Y") if op else "—"
+        self.kpi_pmt.update(f"£{pmt:,.0f}")
+        self.kpi_total.update(f"£{total:,.0f}")
+        self.kpi_intr.update(f"£{intr:,.0f}")
+        self.kpi_save.update(f"£{saving:,.0f}")
+        self.kpi_payoff.update(payoff)
+        self.kpi_months.update(f"{months} months",
+                                f"({months//12}y {months%12}m)" if months else "On original schedule")
+        draw_balance(self.bal_canvas, base, op)
+        draw_equity(self.eq_canvas,  params["price"], base, op)
 
-        self.apply_theme()  # Apply initial dark theme
+# ─────────────────────────────────────────────
+#  ANALYSIS TAB
+# ─────────────────────────────────────────────
+class AnalysisTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 14); root.setSpacing(12)
 
-    def create_input_fields(self):
-        """Create input fields for mortgage details."""
-        grid = QGridLayout()
-        row = 0
-        
-        # House Price
-        self.house_price_edit = QLineEdit()
-        self.house_price_edit.setPlaceholderText("e.g., 300000")
-        self.house_price_edit.setValidator(QDoubleValidator(0.0, 1e9, 2))
-        grid.addWidget(QLabel("House Price (£):"), row, 0)
-        grid.addWidget(self.house_price_edit, row, 1)
-        row += 1
+        # Composition chart (full width)
+        c1 = QFrame(); c1.setObjectName("card")
+        l1 = QVBoxLayout(c1); l1.setContentsMargins(10, 10, 10, 10)
+        self.comp_canvas = ChartCanvas(figsize=(10, 3.4))
+        l1.addWidget(self.comp_canvas)
+        root.addWidget(c1, stretch=1)
 
-        # Deposit
-        self.deposit_edit = QLineEdit()
-        self.deposit_edit.setPlaceholderText("e.g., 60000")
-        self.deposit_edit.setValidator(QDoubleValidator(0.0, 1e9, 2))
-        grid.addWidget(QLabel("Deposit (£):"), row, 0)
-        grid.addWidget(self.deposit_edit, row, 1)
-        row += 1
+        # Annual & cumulative (dual)
+        c2 = QFrame(); c2.setObjectName("card")
+        l2 = QVBoxLayout(c2); l2.setContentsMargins(10, 10, 10, 10)
+        self.ann_canvas = DualChartCanvas(figsize=(12, 3.4))
+        l2.addWidget(self.ann_canvas)
+        root.addWidget(c2, stretch=1)
 
-        # Mortgage Term (Years)
-        self.term_edit = QLineEdit()
-        self.term_edit.setPlaceholderText("e.g., 30")
-        self.term_edit.setValidator(QIntValidator(1, 100))
-        grid.addWidget(QLabel("Mortgage Term (Years):"), row, 0)
-        grid.addWidget(self.term_edit, row, 1)
-        row += 1
+        # Savings
+        c3 = QFrame(); c3.setObjectName("card")
+        l3 = QVBoxLayout(c3); l3.setContentsMargins(10, 10, 10, 10)
+        self.sav_canvas = ChartCanvas(figsize=(10, 3.0))
+        l3.addWidget(self.sav_canvas)
+        root.addWidget(c3, stretch=1)
 
-        # Fixed-Term Interest Rate (%)
-        self.fixed_rate_edit = QLineEdit()
-        self.fixed_rate_edit.setPlaceholderText("e.g., 4.6")
-        self.fixed_rate_edit.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        grid.addWidget(QLabel("Fixed-Term Interest Rate (%):"), row, 0)
-        grid.addWidget(self.fixed_rate_edit, row, 1)
-        row += 1
+    def refresh(self, base, op):
+        draw_composition(self.comp_canvas, op)
+        draw_annual(self.ann_canvas, base, op)
+        draw_savings(self.sav_canvas, base, op)
 
-        # Fixed-Term Duration (Years)
-        self.fixed_term_edit = QLineEdit()
-        self.fixed_term_edit.setPlaceholderText("e.g., 3")
-        self.fixed_term_edit.setValidator(QIntValidator(1, 100))
-        grid.addWidget(QLabel("Fixed-Term Duration (Years):"), row, 0)
-        grid.addWidget(self.fixed_term_edit, row, 1)
-        row += 1
+# ─────────────────────────────────────────────
+#  SCENARIOS TAB
+# ─────────────────────────────────────────────
+class ScenariosTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._params = None
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 14); root.setSpacing(12)
 
-        # Remaining Term Interest Rate (%)
-        self.remaining_rate_edit = QLineEdit()
-        self.remaining_rate_edit.setPlaceholderText("e.g., 5.5")
-        self.remaining_rate_edit.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        grid.addWidget(QLabel("Remaining Term Interest Rate (%):"), row, 0)
-        grid.addWidget(self.remaining_rate_edit, row, 1)
-        row += 1
+        # Controls
+        ctl = QFrame(); ctl.setObjectName("card")
+        cl  = QHBoxLayout(ctl); cl.setContentsMargins(14, 10, 14, 10); cl.setSpacing(16)
+        self._spins: list[SmartSpin] = []
+        defaults = [0, 200, 500, 1000]
+        for i in range(4):
+            col = QVBoxLayout()
+            col.addWidget(QLabel(f"Scenario {i+1}  (£/mo)"))
+            sp = SmartSpin(); sp.setRange(0, 50_000); sp.setDecimals(0)
+            sp.setPrefix("£ "); sp.setSingleStep(50); sp.setValue(defaults[i])
+            sp.setGroupSeparatorShown(True)
+            col.addWidget(sp); cl.addLayout(col); self._spins.append(sp)
+        b_run = QPushButton("Run Scenarios"); b_run.setMinimumHeight(38)
+        b_run.clicked.connect(self._run); cl.addWidget(b_run)
+        root.addWidget(ctl)
 
-        # Monthly Overpayment
-        self.overpayment_edit = QLineEdit()
-        self.overpayment_edit.setPlaceholderText("e.g., 200")
-        self.overpayment_edit.setValidator(QDoubleValidator(0.0, 1e9, 2))
-        grid.addWidget(QLabel("Monthly Overpayment (£):"), row, 0)
-        grid.addWidget(self.overpayment_edit, row, 1)
-        row += 1
+        # Chart
+        cc = QFrame(); cc.setObjectName("card")
+        ccl = QVBoxLayout(cc); ccl.setContentsMargins(10, 10, 10, 10)
+        self.sc_canvas = ChartCanvas(figsize=(10, 4.2))
+        ccl.addWidget(self.sc_canvas)
+        root.addWidget(cc, stretch=1)
 
-        # Calculated Loan Amount (read-only)
-        self.loan_amount_label = QLabel("Loan Amount (£): 0.00")
-        grid.addWidget(self.loan_amount_label, row, 0, 1, 2)
-        row += 1
+        # Summary cards
+        sr = QHBoxLayout(); sr.setSpacing(10)
+        self._scards: list[MetricCard] = []
+        ids = ["kpi", "kpi2", "kpi3", "kpi4"]
+        for i in range(4):
+            mc = MetricCard(f"Scenario {i+1}", "—", kpi_id=ids[i])
+            sr.addWidget(mc); self._scards.append(mc)
+        root.addLayout(sr)
 
-        self.layout.addLayout(grid)
+        # Target calculator
+        tgt = QFrame(); tgt.setObjectName("card")
+        tl  = QHBoxLayout(tgt); tl.setContentsMargins(14, 10, 14, 10); tl.setSpacing(14)
+        tl.addWidget(QLabel("Pay off in (years):"))
+        self.tgt_y = SmartIntSpin(); self.tgt_y.setRange(1, 40); self.tgt_y.setValue(15)
+        tl.addWidget(self.tgt_y)
+        b_tgt = QPushButton("Find Required Overpayment"); b_tgt.clicked.connect(self._calc_target)
+        tl.addWidget(b_tgt)
+        self.tgt_lbl = QLabel("Required monthly overpayment: —")
+        tl.addWidget(self.tgt_lbl); tl.addStretch()
+        root.addWidget(tgt)
 
-        # Connect input changes to update timer
-        for widget in [self.house_price_edit, self.deposit_edit, self.term_edit, self.fixed_rate_edit,
-                       self.fixed_term_edit, self.remaining_rate_edit, self.overpayment_edit]:
-            widget.textChanged.connect(self.start_update_timer)
+    def set_params(self, p): self._params = p
 
-    def create_output_labels(self):
-        """Create labels to display calculation results."""
-        self.results_label = QLabel("Monthly Payment, Total Interest, Payoff Date, etc. will be displayed here.")
-        self.results_label.setWordWrap(True)
-        self.layout.addWidget(self.results_label)
+    def _run(self):
+        if not self._params: return
+        p = self._params; scenarios = []
+        for i, sp in enumerate(self._spins):
+            ov = sp.value()
+            c  = MortgageCalc(p["principal"], p["annual_rate"], p["term_months"],
+                               p["start_date"], ov, p["lump_sums"],
+                               p["rate2"], p["rate2_start_month"])
+            s = c.simulate()
+            scenarios.append((f"£{ov:,.0f}/mo", s))
+            mo_saved = p["term_months"] - len(s)
+            intr     = sum(r["interest"] for r in s)
+            payoff   = s[-1]["date"].strftime("%b %Y")
+            self._scards[i].update(f"£{ov:,.0f}/mo",
+                f"Payoff {payoff} | -{mo_saved}mo | Interest £{intr:,.0f}")
+        draw_scenarios(self.sc_canvas, scenarios)
 
-    def create_buttons(self):
-        """Create buttons for Save, Load, Export Report, and Theme Toggle."""
-        btn_layout = QHBoxLayout()
-        self.save_button = QPushButton("Save Data")
-        self.save_button.clicked.connect(self.save_data)
-        btn_layout.addWidget(self.save_button)
+    def _calc_target(self):
+        if not self._params: return
+        p   = self._params
+        tgt = int(self.tgt_y.value() * 12)
+        req = MortgageCalc.overpayment_for_target(
+            p["principal"], p["annual_rate"], p["term_months"], p["start_date"], tgt,
+            p["rate2"], p["rate2_start_month"])
+        self.tgt_lbl.setText(f"Required monthly overpayment: £{req:,.2f}")
 
-        self.load_button = QPushButton("Load Data")
-        self.load_button.clicked.connect(self.load_data)
-        btn_layout.addWidget(self.load_button)
+# ─────────────────────────────────────────────
+#  SCHEDULE TAB
+# ─────────────────────────────────────────────
+class ScheduleTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._sched = []
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 14); root.setSpacing(10)
 
-        self.export_button = QPushButton("Export PDF Report")
-        self.export_button.clicked.connect(self.export_report)
-        btn_layout.addWidget(self.export_button)
+        top = QHBoxLayout()
+        self.summary = QLabel(""); self.summary.setObjectName("dim")
+        top.addWidget(self.summary); top.addStretch()
+        b_csv = QPushButton("Export CSV"); b_csv.setObjectName("secondary")
+        b_csv.clicked.connect(self._export); top.addWidget(b_csv)
+        root.addLayout(top)
 
-        self.theme_toggle_button = QPushButton("Toggle Light/Dark Mode")
-        self.theme_toggle_button.clicked.connect(self.toggle_theme)
-        btn_layout.addWidget(self.theme_toggle_button)
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(
+            ["Month", "Date", "Payment", "Principal", "Interest", "Overpayment", "Balance"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setStyleSheet(f"QTableWidget {{ alternate-background-color: {PANEL_BG}; }}")
+        root.addWidget(self.table, stretch=1)
 
-        self.layout.addLayout(btn_layout)
+    def refresh(self, sched: list):
+        self._sched = sched
+        self.table.setRowCount(len(sched))
+        tp = sum(r["payment"]  for r in sched)
+        ti = sum(r["interest"] for r in sched)
+        self.summary.setText(f"{len(sched)} payments  |  Total paid: £{tp:,.0f}  |  Total interest: £{ti:,.0f}")
 
-    def create_graph(self):
-        """Create the mortgage balance graph area."""
-        self.graph_canvas = GraphCanvas(self, width=8, height=4, dpi=100)
-        self.layout.addWidget(self.graph_canvas)
+        def item(txt, right=True):
+            it = QTableWidgetItem(txt)
+            if right: it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            return it
 
-    def start_update_timer(self):
-        """Debounce rapid input changes."""
-        self.update_timer.start(500)
+        for i, r in enumerate(sched):
+            self.table.setItem(i, 0, item(str(r["month"]), False))
+            self.table.setItem(i, 1, item(r["date"].strftime("%b %Y"), False))
+            self.table.setItem(i, 2, item(f"£{r['payment']:,.2f}"))
+            self.table.setItem(i, 3, item(f"£{r['principal']:,.2f}"))
+            self.table.setItem(i, 4, item(f"£{r['interest']:,.2f}"))
+            self.table.setItem(i, 5, item(f"£{r['overpayment']:,.2f}"))
+            self.table.setItem(i, 6, item(f"£{r['balance']:,.2f}"))
 
-    def update_calculations(self):
-        """Read inputs, perform calculations, update labels and graph."""
+    def _export(self):
+        if not self._sched: return
+        p = QFileDialog.getSaveFileName(self, "Export Schedule", "amortisation.csv", "CSV (*.csv)")[0]
+        if not p: return
+        with open(p, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Month", "Date", "Payment", "Principal", "Interest", "Overpayment", "Balance"])
+            for r in self._sched:
+                w.writerow([r["month"], r["date"].isoformat(),
+                             round(r["payment"],2), round(r["principal"],2),
+                             round(r["interest"],2), round(r["overpayment"],2),
+                             round(r["balance"],2)])
+
+# ─────────────────────────────────────────────
+#  MAIN WINDOW
+# ─────────────────────────────────────────────
+class MortgageApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Mortgage Overpayment Dashboard")
+        self.resize(1420, 860)
+        self.setMinimumSize(1100, 680)
+        self._dark_titlebar()
+
+        root = QWidget(); self.setCentralWidget(root)
+        ml   = QHBoxLayout(root); ml.setContentsMargins(0, 0, 0, 0); ml.setSpacing(0)
+
+        # Sidebar
+        self.sidebar = Sidebar()
+        self.sidebar.calculate_requested.connect(self._calculate)
+        ml.addWidget(self.sidebar)
+
+        # Content
+        content = QWidget()
+        cl = QVBoxLayout(content); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+
+        # Header
+        hdr = QFrame(); hdr.setFixedHeight(52)
+        hdr.setStyleSheet(f"background:{PANEL_BG}; border-bottom:1px solid {BORDER};")
+        hl  = QHBoxLayout(hdr); hl.setContentsMargins(18, 0, 18, 0)
+        htitle = QLabel("Mortgage Overpayment Dashboard")
+        htitle.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        hl.addWidget(htitle); hl.addStretch()
+        self.status = QLabel("Enter mortgage details and press Calculate")
+        self.status.setObjectName("dim")
+        hl.addWidget(self.status)
+        cl.addWidget(hdr)
+
+        # Tabs
+        self.tabs = QTabWidget()
+        self.t_dash = DashboardTab()
+        self.t_anal = AnalysisTab()
+        self.t_scen = ScenariosTab()
+        self.t_sched= ScheduleTab()
+        self.tabs.addTab(self.t_dash,  "  Dashboard  ")
+        self.tabs.addTab(self.t_anal,  "  Analysis  ")
+        self.tabs.addTab(self.t_scen,  "  Scenarios  ")
+        self.tabs.addTab(self.t_sched, "  Schedule  ")
+        cl.addWidget(self.tabs, stretch=1)
+        ml.addWidget(content, stretch=1)
+
+    def _dark_titlebar(self):
         try:
-            house_price = float(self.house_price_edit.text() or 0)
-            deposit = float(self.deposit_edit.text() or 0)
-            term_years = int(self.term_edit.text() or 0)
-            fixed_rate = float(self.fixed_rate_edit.text() or 0)
-            fixed_term = int(self.fixed_term_edit.text() or 0)
-            remaining_rate = float(self.remaining_rate_edit.text() or 0)
-            monthly_overpayment = float(self.overpayment_edit.text() or 0)
-        except ValueError:
-            return
+            import ctypes
+            hwnd = int(self.winId())
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int))
+        except Exception:
+            pass
 
-        if house_price <= deposit or term_years <= 0:
-            self.results_label.setText("Please ensure the House Price is greater than Deposit and Term > 0.")
-            return
+    def _calculate(self):
+        try:
+            params = self.sidebar.get_params()
+            if params["principal"] <= 0:
+                QMessageBox.warning(self, "Input error", "Loan amount must be greater than zero.")
+                return
+            self.status.setText("Calculating…")
+            QApplication.processEvents()
 
-        loan_amount = house_price - deposit
-        self.loan_amount_label.setText(f"Loan Amount (£): {loan_amount:,.2f}")
+            calc_base = MortgageCalc(
+                params["principal"], params["annual_rate"], params["term_months"],
+                params["start_date"],
+                rate2=params["rate2"], rate2_start_month=params["rate2_start_month"])
+            base = calc_base.simulate_base()
 
-        # Simulation with overpayments
-        schedule_over, summary_over = MortgageCalculator.simulate_schedule(
-            loan_amount, term_years, fixed_rate, fixed_term, remaining_rate, monthly_overpayment
-        )
-        breakdown_over = MortgageCalculator.get_payment_breakdown(schedule_over)
+            calc_op = MortgageCalc(
+                params["principal"], params["annual_rate"], params["term_months"],
+                params["start_date"], params["monthly_overpay"], params["lump_sums"],
+                params["rate2"], params["rate2_start_month"])
+            op = calc_op.simulate()
 
-        # Simulation without overpayments
-        schedule_no, summary_no = MortgageCalculator.simulate_schedule(
-            loan_amount, term_years, fixed_rate, fixed_term, remaining_rate, monthly_overpayment=0
-        )
-        breakdown_no = MortgageCalculator.get_payment_breakdown(schedule_no)
+            self.t_dash.refresh(params, base, op)
+            self.t_anal.refresh(base, op)
+            self.t_scen.set_params(params); self.t_scen._run()
+            self.t_sched.refresh(op)
 
-        # Prepare result summary text
-        result_text = (
-            f"<b>With Overpayments:</b><br>"
-            f"Monthly Payment (Phase 1 based on full term): {MortgageCalculator.calc_monthly_payment(loan_amount, fixed_rate, term_years*12):,.2f} <br>"
-            f"Total Interest Paid: {breakdown_over['total_interest']:,.2f} <br>"
-            f"Total Payment: {breakdown_over['total_payment']:,.2f} <br>"
-            f"Loan Paid Off in: {summary_over['months_taken']} months <br>"
-            f"Estimated Payoff Date: {summary_over['payoff_date']} <br>"
-            f"Time Saved: {summary_over['time_saved_months']} months <br><br>"
-            f"<b>Without Overpayments:</b><br>"
-            f"Total Interest Paid: {breakdown_no['total_interest']:,.2f} <br>"
-            f"Total Payment: {breakdown_no['total_payment']:,.2f} <br>"
-        )
-        self.results_label.setText(result_text)
-
-        # Update graph
-        self.graph_canvas.update_plot(schedule_over, schedule_no)
-
-    def save_data(self):
-        """Save current mortgage details to a JSON file."""
-        inputs = self.get_input_data()
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Mortgage Data", "", "JSON Files (*.json)")
-        if filename:
-            try:
-                FileHandler.save_data(inputs, filename)
-                QMessageBox.information(self, "Save Data", "Data saved successfully.")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save data: {e}")
-
-    def load_data(self):
-        """Load mortgage details from a JSON file."""
-        filename, _ = QFileDialog.getOpenFileName(self, "Load Mortgage Data", "", "JSON Files (*.json)")
-        if filename:
-            try:
-                data = FileHandler.load_data(filename)
-                self.set_input_data(data)
-                self.update_calculations()
-                QMessageBox.information(self, "Load Data", "Data loaded successfully.")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load data: {e}")
-
-    def export_report(self):
-        """Export a PDF report with the current mortgage data and graph."""
-        filename, _ = QFileDialog.getSaveFileName(self, "Export PDF Report", "", "PDF Files (*.pdf)")
-        if filename:
-            # Gather current input and summary details
-            inputs = self.get_input_data()
-            house_price = float(self.house_price_edit.text() or 0)
-            deposit = float(self.deposit_edit.text() or 0)
-            loan_amount = house_price - deposit
-            term_years = int(self.term_edit.text() or 0)
-            fixed_rate = float(self.fixed_rate_edit.text() or 0)
-            fixed_term = int(self.fixed_term_edit.text() or 0)
-            remaining_rate = float(self.remaining_rate_edit.text() or 0)
-            monthly_overpayment = float(self.overpayment_edit.text() or 0)
-
-            schedule_over, summary_over = MortgageCalculator.simulate_schedule(
-                loan_amount, term_years, fixed_rate, fixed_term, remaining_rate, monthly_overpayment
+            months_saved = len(base) - len(op)
+            payoff = op[-1]["date"].strftime("%b %Y")
+            self.status.setText(
+                f"Done  |  Payoff: {payoff}  |  {len(op)} payments  |  "
+                f"{months_saved} months saved ({months_saved//12}y {months_saved%12}m)"
             )
-            breakdown_over = MortgageCalculator.get_payment_breakdown(schedule_over)
-            try:
-                ReportExporter.export_pdf(filename, inputs, summary_over, breakdown_over, self.graph_canvas)
-                QMessageBox.information(self, "Export Report", "PDF report exported successfully.")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export report: {e}")
+        except Exception as ex:
+            QMessageBox.critical(self, "Error", str(ex))
+            self.status.setText("Error — check inputs")
 
-    def get_input_data(self) -> dict:
-        """Retrieve current input data as a dictionary."""
-        return {
-            "House Price": self.house_price_edit.text(),
-            "Deposit": self.deposit_edit.text(),
-            "Mortgage Term (Years)": self.term_edit.text(),
-            "Fixed-Term Interest Rate (%)": self.fixed_rate_edit.text(),
-            "Fixed-Term Duration (Years)": self.fixed_term_edit.text(),
-            "Remaining Term Interest Rate (%)": self.remaining_rate_edit.text(),
-            "Monthly Overpayment": self.overpayment_edit.text()
-        }
-
-    def set_input_data(self, data: dict):
-        """Set the input fields from a data dictionary."""
-        self.house_price_edit.setText(data.get("House Price", ""))
-        self.deposit_edit.setText(data.get("Deposit", ""))
-        self.term_edit.setText(data.get("Mortgage Term (Years)", ""))
-        self.fixed_rate_edit.setText(data.get("Fixed-Term Interest Rate (%)", ""))
-        self.fixed_term_edit.setText(data.get("Fixed-Term Duration (Years)", ""))
-        self.remaining_rate_edit.setText(data.get("Remaining Term Interest Rate (%)", ""))
-        self.overpayment_edit.setText(data.get("Monthly Overpayment", ""))
-
-    def toggle_theme(self):
-        """Toggle between dark and light modes."""
-        self.current_theme = "light" if self.current_theme == "dark" else "dark"
-        self.apply_theme()
-
-    def apply_theme(self):
-        """Apply the current theme using QSS stylesheets."""
-        if self.current_theme == "dark":
-            style = """
-            QWidget {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #101010, stop:1 #1A1A1A);
-                color: white;
-                font-family: Arial;
-                font-size: 13px;
-            }
-            QLineEdit {
-                background-color: #2F2F2F;
-                border: 1px solid #3E3E3E;
-                padding: 4px;
-                color: white;
-            }
-            QPushButton {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(60,60,60,0.95), stop:1 rgba(40,40,40,0.95));
-                border: none;
-                padding: 6px;
-                border-radius: 4px;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(70,70,70,0.95), stop:1 rgba(50,50,50,0.95));
-            }
-            QPushButton:pressed {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(50,50,50,0.95), stop:1 rgba(30,30,30,0.95));
-            }
-            QPushButton:disabled {
-                background-color: rgba(80,80,80,0.95);
-                color: rgba(200,200,200,0.7);
-            }
-            QScrollBar:vertical {
-                background: rgba(60,60,60,0.95);
-                width: 12px;
-                margin: 0px 0px 0px 0px;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(40,40,40,0.95);
-                border-radius: 6px;
-            }
-            QProgressBar {
-                border: 1px solid #3E3E3E;
-                border-radius: 5px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3E3E3E, stop:1 #5E5E5E);
-                border-radius: 5px;
-            }
-            """
-        else:
-            # Light mode style
-            style = """
-            QWidget {
-                background-color: #F0F0F0;
-                color: #202020;
-                font-family: Arial;
-                font-size: 13px;
-            }
-            QLineEdit {
-                background-color: #FFFFFF;
-                border: 1px solid #AAAAAA;
-                padding: 4px;
-                color: #202020;
-            }
-            QPushButton {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #DDDDDD, stop:1 #BBBBBB);
-                border: none;
-                padding: 6px;
-                border-radius: 4px;
-                color: #202020;
-            }
-            QPushButton:hover {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #EEEEEE, stop:1 #CCCCCC);
-            }
-            QPushButton:pressed {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #CCCCCC, stop:1 #AAAAAA);
-            }
-            QPushButton:disabled {
-                background-color: #BBBBBB;
-                color: #888888;
-            }
-            QScrollBar:vertical {
-                background: #DDDDDD;
-                width: 12px;
-                margin: 0px 0px 0px 0px;
-            }
-            QScrollBar::handle:vertical {
-                background: #BBBBBB;
-                border-radius: 6px;
-            }
-            QProgressBar {
-                border: 1px solid #AAAAAA;
-                border-radius: 5px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #AAAAAA, stop:1 #888888);
-                border-radius: 5px;
-            }
-            """
-        self.setStyleSheet(style)
-
-# =============================================================================
-# Main Execution
-# =============================================================================
+# ─────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
-    window = MortgageTrackerWindow()
-    window.show()
+    app.setStyleSheet(stylesheet())
+    win = MortgageApp()
+    win.show()
     sys.exit(app.exec())
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
