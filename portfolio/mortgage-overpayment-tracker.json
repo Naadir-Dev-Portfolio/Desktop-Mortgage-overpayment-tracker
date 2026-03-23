@@ -7,7 +7,7 @@
   "imgs": [
     "mortgageTrackerScreen.webp"
   ],
-  "desc": "Interactive mortgage dashboard — model overpayment scenarios, visualise interest saved, and see exactly when you'll be mortgage-free.",
+  "desc": "Interactive mortgage dashboard, model overpayment scenarios, visualise interest saved, and see exactly when you'll be mortgage free.",
   "tags": [
     "python",
     "pyqt",
